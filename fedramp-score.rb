@@ -59,7 +59,35 @@ Options:
       results = parse_nessus_file(@options[:directory] + '/' + file, results)
 
     end
-    binding.pry
+
+    output_score(results)
+  end
+
+  # print the score in a meaningful fashion
+  def output_score(scan_data)
+
+    score = {}
+
+    scan_data.each do |scan_id, results|
+
+      if !score[results["Risk"]]
+
+        score[results["Risk"]] = {}
+
+        score[results["Risk"]]["Findings"] = 0
+        score[results["Risk"]]["Host Count"] = 0
+
+      end
+
+
+      score[results["Risk"]]["Findings"] += 1
+      score[results["Risk"]]["Host Count"] += results["Hosts"].count
+
+#      binding.pry
+    end
+
+    puts score.to_json
+
   end
 
   # Nessus CSVs are like this:
