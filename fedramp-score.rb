@@ -4,6 +4,8 @@ require 'json'
 require 'csv'
 require 'set'
 require 'nokogiri'
+require 'net/https'
+require 'erb'
 
 require 'pry'
 
@@ -20,6 +22,8 @@ class JIRAUpdate
 
     if @options[:type]
       get_score(@options)
+    elsif@options[:jira_search]
+      get_findings(@options)
     else
       # do nothing
     end
@@ -45,6 +49,9 @@ Options:
       end
       opts.on('-t', '--scan_type TYPE', 'Type of scan so parse (nessus, acunetix, appdetectivepro') do |p|
         @options[:type] = p
+      end
+      opts.on('-j', '--jira_search JQL', 'Search JIRA with JQL, return results') do |p|
+        @options[:jira_search] = p
       end
     end.parse!(argv)
   end
@@ -100,7 +107,9 @@ Options:
       end
     end
 
-    puts JSON.pretty_generate(score)
+    #binding.pry
+
+    #puts JSON.pretty_generate(score)
     puts JSON.pretty_generate(totals)
 
   end
@@ -247,6 +256,8 @@ Options:
   # Plugin ID,CVE,CVSS,Risk,Host,Protocol,Port,Name,Synopsis,Description,Solution,See Also,Plugin Output
   def parse_nessus_file(filename, results)
 
+    #puts "parsing #{filename}"
+
     CSV.foreach(filename, :headers => true) do |row|
       # we don't care about rows that have risk=none
       if row["Risk"] != "None"
@@ -266,6 +277,56 @@ Options:
     end
 
     return results
+  end
+
+  # search for issues, return search results
+  def search_jira(options)
+
+    jira_issues = {}
+
+    jql_encoded = ERB::Util.url_encode(options[:jira_search])
+
+    http = Net::HTTP.new(@jira_host, @jira_port)
+    http.use_ssl = @use_ssl
+    http.start do |http|
+      req = Net::HTTP::Get.new('/rest/api/2/search?jql=' + jql_encoded + "&maxResults=500")
+
+      # we make an HTTP basic auth by passing the
+      # username and password
+      req.basic_auth ENV['JIRA_USER'], ENV['JIRA_PASS']
+      resp, data = http.request(req)
+      #puts "Search resp: " + resp.code + "\n"
+
+      if resp.code.eql? '200'
+        #print "Data: " +  JSON.pretty_generate(JSON.parse(resp.body.to_s))
+        jira_issues = JSON.parse(resp.body.to_s)
+      else
+        puts "Error: " + resp.code.to_s + "\n" + resp.body
+      end
+    end
+
+    return jira_issues
+  end
+
+  def get_findings(options)
+
+    issues = search_jira(options)
+
+    parsed_issues = {}
+
+    issues["issues"].each do | issue |
+
+      puts "Key: #{issue["key"]}"
+      puts "Summary: #{issue["fields"]["summary"]}"
+      puts "Source: #{issue["fields"]["customfield_12756"]["value"]}"
+      puts "Source ID: #{issue["fields"]["customfield_12757"]}"
+      puts "Assets: #{issue["fields"]["customfield_12758"]}"
+      puts "Assets (additional): #{issue["fields"]["customfield_13850"]}"
+      puts "Assets (current): #{issue["fields"]["customfield_14050"]}"
+
+      binding.pry
+    end
+
   end
 
 end
