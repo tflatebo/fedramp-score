@@ -1,4 +1,5 @@
 #!/usr/bin/env ruby
+# coding: utf-8
 require 'optparse'
 require 'json'
 require 'csv'
@@ -53,67 +54,163 @@ Options:
       opts.on('-j', '--jira_search JQL', 'Search JIRA with JQL, return results') do |p|
         @options[:jira_search] = p
       end
+      opts.on('-v', '--verbose', 'Show things like risk level in the output') do |p|
+        @options[:verbose] = p
+      end
     end.parse!(argv)
   end
 
-  # look in a directory for a list of files of a certain type
+  # for a directory tree containing scan results by month and type, get all of the scores
+  # scan_results/
+  # ├── 2016.01
+  # │   ├── acunetix
+  # │   ├── appdetectivepro
+  # │   └── nessus
+  # ├── 2016.02
+  # │   ├── acunetix
+  # │   ├── appdetectivepro
+  # │   └── nessus
   def get_score(options)
+
+    # storage for all the monthly results
+    all_results = {}
+    
+    Dir.foreach(options[:directory]) do |month|
+      next if month == '.' or month == '..' or month !~ /\d{4,4}\.\d{2,2}/
+
+      if File.directory?(options[:directory] + '/' + month)
+        month_results = get_month_detail(options, month)
+        all_results[month] = month_results
+      end
+      
+    end
+
+    # collate and output total score by month
+    totals = compute_score(all_results)
+
+    puts JSON.pretty_generate(totals)
+    
+  end
+
+  # calc a score per month
+  # month =>
+  #   total    = total unique findings currently found
+  #   existing = findings that were not fixed from last month
+  #   new      = new findings that were not in previous month
+  #   closed   = findings closed since last month
+  #
+  # total    = cur_month.ids.count
+  # existing = intersection of cur_month.ids and prev_month.ids
+  # new      = cur_month.total - cur_month.existing
+  # closed   = prev_month.total - cur_month.existing
+  def compute_score(results)
+    # results is a hash of months and the results for each month
+    # month => type => id => detail
+
+    totals = { }
+    prev_month_result = { }
+    prev_month_totals = { }
+    
+    # iterate through each month
+    results.sort.each do | month, result |      
+      month_total = compute_month_totals(result)
+      totals[month] = month_total
+      # total is already given by month_total["total"]
+      totals[month]["existing"] = compute_intersection(prev_month_result, result)
+      totals[month]["new"] = totals[month]["total"] - totals[month]["existing"]
+      totals[month]["closed"] = prev_month_totals["total"] - totals[month]["existing"] if prev_month_totals.key?("total")
+
+      prev_month_totals = totals[month]
+      prev_month_result = result
+    end
+
+    return totals
+                          
+  end
+
+  # what is the number of unique scan findings that exist in both months?
+  def compute_intersection(prev_month, cur_month)
+
+    intersection = 0
+    
+    cur_month.each do | type, findings |
+      findings.each do | id, detail |
+        if prev_month.key?(type) && prev_month[type].key?(id) && detail["risk"] != "none" && detail["risk"] != "info"
+          intersection += 1
+          #puts "intersected: #{id} :: #{detail["risk"]}"
+        else
+          #puts "new: #{id} :: #{detail["risk"]}"
+        end
+      end
+    end
+
+    return intersection
+  end
+  
+  # parse all of the raw scan results for a month
+  def get_month_detail(options, month)
 
     nessus_results = {}
     acunetix_results = {}
     appdetectivepro_results= {}
 
-    Dir.foreach(@options[:directory]) do |file|
+    dir = @options[:directory] + '/' + month
+    
+    Dir.foreach(dir) do |file|
       next if file == '.' or file == '..'
 
-      if File.directory?(@options[:directory] + '/' + file)
+      if File.directory?(dir + '/' + file)
         if file == "nessus"
-          results = parse_nessus_files(@options[:directory] + '/' + file, nessus_results)
+          results = parse_nessus_files(dir + '/' + file, nessus_results)
         elsif file == "acunetix"
-          results = parse_acunetix_files(@options[:directory] + '/' + file, acunetix_results)
+          results = parse_acunetix_files(dir + '/' + file, acunetix_results)
         elsif file == "appdetectivepro"
-          results = parse_appdetectivepro_files(@options[:directory] + '/' + file, appdetectivepro_results)
+          results = parse_appdetectivepro_files(dir + '/' + file, appdetectivepro_results)
         end
-
       end
-
     end
 
-    output_score(nessus_results, acunetix_results, appdetectivepro_results)
-  end
+    month_detail =
+      {
+        "nessus" => nessus_results,
+        "acunetix" => acunetix_results,
+        "appdetectivepro" => appdetectivepro_results,
+      }
 
-  # print the score in a meaningful fashion
-  def output_score(nessus, acunetix, appdetectivepro)
+    return month_detail
+    
+  end
+  
+  # return a total number of unique findings by risk_level and total (unique findings and total hosts per finding)
+  def compute_month_totals(month_detail)
 
     score = {}
-    totals = {}
+    totals = { "total" => 0, "new" => 0, "existing" => 0, "closed" => 0, "risk_level" => {} }
 
-    score = process_result(acunetix, "acunetix", score)
-    score = process_result(appdetectivepro, "appdetectivepro", score)
-    score = process_result(nessus, "nessus", score)
+    score = process_result(month_detail["acunetix"], "acunetix", score)
+    score = process_result(month_detail["appdetectivepro"], "appdetectivepro", score)
+    score = process_result(month_detail["nessus"], "nessus", score)
 
     score.each do |type, values|
-      #binding.pry
       values.each do |risk, values|
-      if !totals[risk]
-        totals[risk] = {}
-        totals[risk]["Findings"] = 0
-        totals[risk]["Host Count"] = 0
-      end
-
-      #binding.pry
-      totals[risk]["Findings"] += values["Findings"].to_i
-      totals[risk]["Host Count"] += values["Host Count"].to_i
+        if(@options[:verbose])
+          if !totals["risk_level"][risk]
+            totals["risk_level"][risk] = {}
+            totals["risk_level"][risk]["findings"] = 0
+            totals["risk_level"][risk]["host_count"] = 0
+          end
+          
+          totals["risk_level"][risk]["findings"] += values["findings"].to_i
+          totals["risk_level"][risk]["host_count"] += values["host_count"].to_i
+        end
+        totals["total"] += values["findings"].to_i
       end
     end
-
-    #binding.pry
-
-    #puts JSON.pretty_generate(score)
-    puts JSON.pretty_generate(totals)
-
+    
+    return totals    
   end
 
+  # compile a detail result for a type of scan into totals, unique findings and total hosts per finding
   def process_result(result, key, score)
 
     score[key] = {}
@@ -123,31 +220,25 @@ Options:
       # don't count informational messages
       if results["Risk"] != "info" && results["Risk"] != "none"
 
-        if !score[key][results["Risk"]]
+        if !score[key][results["risk"]]
 
-          score[key][results["Risk"]] = {}
+          score[key][results["risk"]] = {}
 
-          score[key][results["Risk"]]["Findings"] = 0
-          score[key][results["Risk"]]["Host Count"] = 0
-
+          score[key][results["risk"]]["findings"] = 0
+          score[key][results["risk"]]["host_count"] = 0
         end
 
-        score[key][results["Risk"]]["Findings"] += 1
-        score[key][results["Risk"]]["Host Count"] += results["Hosts"].count
-
+        score[key][results["risk"]]["findings"] += 1
+        score[key][results["risk"]]["host_count"] += results["hosts"].count
       end
-
-
-#      binding.pry
     end
-
 
     return score
   end
 
   # nessus files are csv
   def parse_nessus_files(dir, results)
-
+    
     Dir.glob(dir + '/' + '*.csv') do |file|
       results = parse_nessus_file(file, results)
     end
@@ -180,14 +271,11 @@ Options:
   # other scanner output types
   def parse_appdetectivepro_file(filename, results)
 
-    #binding.pry
     doc = Nokogiri::XML(File.open(filename))
-    #binding.pry
 
     report_items = doc.xpath('//CheckResults/CheckResult')
     report_items.each do |element|
 
-      #binding.pry
       host = element.at_xpath('Asset').content
       name = element.at_xpath('CheckName').content
       risk = element.at_xpath('Risk').content
@@ -196,17 +284,15 @@ Options:
       if !results[name]
 
         results[name] = {}
-        results[name]["Hosts"] = Set.new
-        results[name]["Description"] = description
-        results[name]["Risk"] = risk.downcase
+        results[name]["hosts"] = Set.new
+        results[name]["description"] = description
+        results[name]["risk"] = risk.downcase
 
       end
 
-      results[name]["Hosts"].add(host)
+      results[name]["hosts"].add(host)
 
     end
-
-    #binding.pry
 
     return results
   end
@@ -217,14 +303,11 @@ Options:
   # other scanner output types
   def parse_acunetix_file(filename, results)
 
-    #binding.pry
     doc = Nokogiri::XML(File.open(filename))
-    #binding.pry
 
     report_items = doc.xpath('//ScanGroup/Scan/ReportItems/ReportItem')
     report_items.each do |element|
 
-      #binding.pry
       host = doc.at_xpath('//StartURL').content
       name = element.at_xpath('Name').content
       risk = element.at_xpath('Severity').content
@@ -233,17 +316,15 @@ Options:
       if !results[name]
 
         results[name] = {}
-        results[name]["Hosts"] = Set.new
-        results[name]["Description"] = description
-        results[name]["Risk"] = risk
+        results[name]["hosts"] = Set.new
+        results[name]["description"] = description
+        results[name]["risk"] = risk
 
       end
 
-      results[name]["Hosts"].add(host)
+      results[name]["hosts"].add(host)
 
     end
-
-    #binding.pry
 
     return results
   end
@@ -256,23 +337,21 @@ Options:
   # Plugin ID,CVE,CVSS,Risk,Host,Protocol,Port,Name,Synopsis,Description,Solution,See Also,Plugin Output
   def parse_nessus_file(filename, results)
 
-    #puts "parsing #{filename}"
-
     CSV.foreach(filename, :headers => true) do |row|
       # we don't care about rows that have risk=none
       if row["Risk"] != "None"
 
         if !results[row["Plugin ID"]]
           results[row["Plugin ID"]] = {}
-          results[row["Plugin ID"]]["Hosts"] = Set.new # use a set so we can remove duplicate host entries
-          results[row["Plugin ID"]]["Description"] = row["Description"]
-          results[row["Plugin ID"]]["Plugin Output"] = row["Plugin Output"]
-          results[row["Plugin ID"]]["Risk"] = row["Risk"].downcase
-          results[row["Plugin ID"]]["CVE"] = row["CVE"]
-          results[row["Plugin ID"]]["CVSS"] = row["CVSS"]
+          results[row["Plugin ID"]]["hosts"] = Set.new # use a set so we can remove duplicate host entries
+          results[row["Plugin ID"]]["description"] = row["Description"]
+          results[row["Plugin ID"]]["plugin Output"] = row["Plugin Output"]
+          results[row["Plugin ID"]]["risk"] = row["Risk"].downcase
+          results[row["Plugin ID"]]["cve"] = row["CVE"]
+          results[row["Plugin ID"]]["cvss"] = row["CVSS"]
         end
 
-        results[row["Plugin ID"]]["Hosts"].add(row["Host"])
+        results[row["Plugin ID"]]["hosts"].add(row["Host"])
       end
     end
 
@@ -295,7 +374,6 @@ Options:
       # username and password
       req.basic_auth ENV['JIRA_USER'], ENV['JIRA_PASS']
       resp, data = http.request(req)
-      #puts "Search resp: " + resp.code + "\n"
 
       if resp.code.eql? '200'
         #print "Data: " +  JSON.pretty_generate(JSON.parse(resp.body.to_s))
@@ -324,7 +402,6 @@ Options:
       puts "Assets (additional): #{issue["fields"]["customfield_13850"]}"
       puts "Assets (current): #{issue["fields"]["customfield_14050"]}"
 
-      binding.pry
     end
 
   end
