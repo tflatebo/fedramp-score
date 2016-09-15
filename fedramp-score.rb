@@ -185,7 +185,10 @@ Options:
   def compute_month_totals(month_detail)
 
     score = {}
-    totals = { "total" => 0, "new" => 0, "existing" => 0, "closed" => 0, "risk_level" => {} }
+    totals = { "total" => 0, "new" => 0, "existing" => 0, "closed" => 0 }
+    if(@options[:verbose])
+      totals["risk_level"] = {}
+    end
 
     score = process_result(month_detail["acunetix"], "acunetix", score)
     score = process_result(month_detail["appdetectivepro"], "appdetectivepro", score)
@@ -203,7 +206,8 @@ Options:
           totals["risk_level"][risk]["findings"] += values["findings"].to_i
           totals["risk_level"][risk]["host_count"] += values["host_count"].to_i
         end
-        totals["total"] += values["findings"].to_i
+        # add the number of findings up into a total for the month, only if they are 
+        totals["total"] += values["findings"].to_i if(risk != "none" && risk != "info")
       end
     end
     
