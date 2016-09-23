@@ -88,10 +88,56 @@ Options:
     # collate and output total score by month
     totals = compute_score(all_results)
 
+    if options[:verbose]
+      print_totals_verbose(totals)
+    else
+      print_totals(totals)
+    end
+      
+  end
+
+  # only print totals, skip the details
+  def print_totals_verbose(totals)
+
+    totals.each do | month, detail |
+      detail.each do | key, value |
+        if value.is_a?(Hash)
+          value.each do | dkey, dvalue |
+            if(dkey == 'findings')
+              dvalue.each do | finding, fdetail |
+                #if fdetail['risk'] != 'info'
+                  puts [month,key,fdetail['scanner'],finding,fdetail['risk'],fdetail['hosts'].to_a.join(','),fdetail['description']].to_csv
+                #end
+              end
+            else
+              value.delete(dkey)
+            end
+          end
+        end
+      end
+    end
+
+#    binding.pry
+    
+#    puts JSON.pretty_generate(totals)
+    
+  end
+  
+  # only print totals, skip the details
+  def print_totals(totals)
+
+    totals.each do | month, detail |
+      detail.each do | key, value |
+        if value.is_a?(Hash) && value.key?('findings')
+          value.delete 'findings'
+        end
+      end
+    end
+
     puts JSON.pretty_generate(totals)
     
   end
-
+  
   # calc a score per month
   # month =>
   #   total    = total unique findings currently found
@@ -116,9 +162,11 @@ Options:
       month_total = compute_month_totals(result)
       totals[month] = month_total
       # total is already given by month_total["total"]
-      totals[month]["existing"] = compute_intersection(prev_month_result, result)
-      totals[month]["new"] = totals[month]["total"] - totals[month]["existing"]
-      totals[month]["closed"] = prev_month_totals["total"] - totals[month]["existing"] if prev_month_totals.key?("total")
+      intersection = compute_intersection(prev_month_result, result)
+      
+      totals[month]["existing"] = intersection['existing']
+      totals[month]["new"] = intersection['new']
+      totals[month]["closed"] = intersection['closed']
 
       prev_month_totals = totals[month]
       prev_month_result = result
@@ -128,22 +176,72 @@ Options:
                           
   end
 
-  # what is the number of unique scan findings that exist in both months?
+  # what is the number of unique scan findings that exist in both months (existing)?
+  # what are the findings only in the current month (new)?
+  # what are the findings only in the prev_month (closed)?
   def compute_intersection(prev_month, cur_month)
 
-    intersection = 0
+    # this should probably be a class :(
+    intersection =
+      {
+        "existing" =>
+        {
+          'count' => 0,
+          'findings' => {}
+        },
+        "new" =>
+        {
+          'count' => 0,
+          'findings' => {}
+        },
+        "closed" =>
+        {
+          'count' => 0,
+          'findings' => {}
+        }
+      }
+    # what findings are only in the current month?
+    cur_month_only = {}
     
     cur_month.each do | type, findings |
       findings.each do | id, detail |
         if prev_month.key?(type) && prev_month[type].key?(id) && detail["risk"] != "none" && detail["risk"] != "info"
-          intersection += 1
-          #puts "intersected: #{id} :: #{detail["risk"]}"
-        else
-          #puts "new: #{id} :: #{detail["risk"]}"
+          # it exists in both cur_month and prev_month
+          if intersection['existing']['findings'][id] && intersection['existing']['findings'][id]['hosts']
+            intersection['existing']['findings'][id]['hosts'].merge detail['hosts']
+          else
+            intersection['existing']['findings'][id] = detail
+          end
+        elsif detail["risk"] != "info"
+          # it only exists in cur_month, it is new
+          if intersection['new']['findings'][id] && intersection['new']['findings'][id]['hosts']
+            intersection['new']['findings'][id]['hosts'].merge detail['hosts']
+          else
+            intersection['new']['findings'][id] = detail
+          end
         end
       end
     end
 
+    prev_month.each do | type, findings |
+      findings.each do | id, detail |
+        if cur_month.key?(type) && cur_month[type].key?(id) && detail["risk"] != "none" && detail["risk"] != "info"
+          # it exists in both so we don't care
+        elsif detail["risk"] != "info"
+          # it only exists in prev_month, it is closed
+          if intersection['closed']['findings'][id] && intersection['closed']['findings'][id]['hosts']
+            intersection['closed']['findings'][id]['hosts'].merge detail['hosts']
+          else
+            intersection['closed']['findings'][id] = detail
+          end
+        end
+      end
+    end
+
+    intersection['existing']['count'] = intersection['existing']['findings'].count
+    intersection['new']['count'] = intersection['new']['findings'].count
+    intersection['closed']['count'] = intersection['closed']['findings'].count
+    
     return intersection
   end
   
@@ -186,9 +284,9 @@ Options:
 
     score = {}
     totals = { "total" => 0, "new" => 0, "existing" => 0, "closed" => 0 }
-    if(@options[:verbose])
+#    if(@options[:verbose])
       totals["risk_level"] = {}
-    end
+#    end
 
     score = process_result(month_detail["acunetix"], "acunetix", score)
     score = process_result(month_detail["appdetectivepro"], "appdetectivepro", score)
@@ -196,7 +294,7 @@ Options:
 
     score.each do |type, values|
       values.each do |risk, values|
-        if(@options[:verbose])
+#        if(@options[:verbose])
           if !totals["risk_level"][risk]
             totals["risk_level"][risk] = {}
             totals["risk_level"][risk]["findings"] = 0
@@ -205,12 +303,16 @@ Options:
           
           totals["risk_level"][risk]["findings"] += values["findings"].to_i
           totals["risk_level"][risk]["host_count"] += values["host_count"].to_i
-        end
+#        end
         # add the number of findings up into a total for the month, only if they are 
         totals["total"] += values["findings"].to_i if(risk != "none" && risk != "info")
       end
     end
-    
+
+#    if(@options[:verbose])
+      totals["detail"] = score      
+#    end
+
     return totals    
   end
 
@@ -285,17 +387,19 @@ Options:
       risk = element.at_xpath('Risk').content
       description = element.at_xpath('Summary').content
 
-      if !results[name]
+      if !results[name] && (risk.downcase != 'none' && risk.downcase != 'info')
 
         results[name] = {}
         results[name]["hosts"] = Set.new
         results[name]["description"] = description
         results[name]["risk"] = risk.downcase
-
+        results[name]["scanner"] = "appdetectivepro"
+        
       end
 
-      results[name]["hosts"].add(host)
-
+      if (risk.downcase != 'none' && risk.downcase != 'info')
+        results[name]["hosts"].add(host)
+      end
     end
 
     return results
@@ -317,16 +421,19 @@ Options:
       risk = element.at_xpath('Severity').content
       description = element.at_xpath('Description').content
 
-      if !results[name]
+      if !results[name] && (risk.downcase != 'none' && risk.downcase != 'info')
 
         results[name] = {}
         results[name]["hosts"] = Set.new
         results[name]["description"] = description
         results[name]["risk"] = risk
+        results[name]["scanner"] = "acunetix"
 
       end
 
-      results[name]["hosts"].add(host)
+      if (risk.downcase != 'none' && risk.downcase != 'info')
+        results[name]["hosts"].add(host)
+      end
 
     end
 
@@ -345,7 +452,8 @@ Options:
       # we don't care about rows that have risk=none
       if row["Risk"] != "None"
 
-        if !results[row["Plugin ID"]]
+        if !results[row["Plugin ID"]] &&
+           (row["Risk"].downcase != 'none' && row["Risk"].downcase != 'info')
           results[row["Plugin ID"]] = {}
           results[row["Plugin ID"]]["hosts"] = Set.new # use a set so we can remove duplicate host entries
           results[row["Plugin ID"]]["description"] = row["Description"]
@@ -353,9 +461,12 @@ Options:
           results[row["Plugin ID"]]["risk"] = row["Risk"].downcase
           results[row["Plugin ID"]]["cve"] = row["CVE"]
           results[row["Plugin ID"]]["cvss"] = row["CVSS"]
+          results[row["Plugin ID"]]["scanner"] = "nessus"
         end
 
-        results[row["Plugin ID"]]["hosts"].add(row["Host"])
+        if (row["Risk"].downcase != 'none' && row["Risk"].downcase != 'info')
+          results[row["Plugin ID"]]["hosts"].add(row["Host"])
+        end
       end
     end
 
